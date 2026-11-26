@@ -1,5 +1,14 @@
 name: 龙湖天街自动签到（保留，不推荐）
 
+# ==================== 我的定制改动（相对于上游） ====================
+# 目的：让 Actions 也能享受小程序 token 自动续期（token2key → key2token）
+#   [定制-1] 新增「恢复续期状态」：actions/cache/restore 读取上次的 .state
+#   [定制-2] 新增「保存续期状态」：actions/cache/save 写回续期结果（签到失败也存）
+#   [定制-3] 新增「失败提示」：把 801001 / 801810 / 8040012 的处置方式打进日志
+#   [定制-4] cache key 用 run_id + run_attempt，避免同一 run 重跑时 key 已存在而报错
+# 上游原有部分（cron、环境变量、concurrency、验证码图片上传）保持不动
+# =====================================================================
+
 on:
   # 定时任务：每天 9 点触发
   # UTC 时间：1 点（UTC+8 = 北京时间 9 点）
@@ -24,6 +33,17 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+
+      # [定制-1] 上游没有：从 cache 恢复 .state，否则每次 runner 都是空的
+      - name: 恢复续期状态
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          # [定制-4] run_attempt 区分重跑，避免 key 冲突
+          key: longfor-state-${{ github.run_id }}-${{ github.run_attempt }}
+          # 前缀匹配：拿仓库里最近一次成功保存的缓存
+          restore-keys: |
+            longfor-state-
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
@@ -54,7 +74,26 @@ jobs:
           SAVE_CAPTCHA_IMAGES: 'true'  # 启用图片保存功能
         run: |
           python main.py
-      
+
+      # [定制-2] 上游没有：把续期后的 token 写回 cache，供下一次运行使用
+      - name: 保存续期状态
+        # 签到失败也要保存，续期结果比签到结果更重要
+        # hashFiles 守卫：首次运行/提前失败时没有 .state，跳过避免报错
+        if: always() && hashFiles('.state/credentials.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: longfor-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # [定制-3] 上游没有：失败时在日志和通知里直接给出排查指引
+      - name: 失败提示
+        if: failure()
+        run: |
+          echo "::error::签到未完成，请查看上方日志："
+          echo "  801001 → 登录已过期，需重新抓包并更新 LONGFOR_TOKEN"
+          echo "  801810 → 活动侧风控/限流，等次日人工核实"
+          echo "  8040012/8040016 → 验证码未能自动通过，需人工处理"
+
       - name: 上传验证码图片
         if: always()  # 即使签到失败也上传
         uses: actions/upload-artifact@v4
